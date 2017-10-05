@@ -1,0 +1,146 @@
+#include <linux/init.h>
+#include <linux/module.h>
+#include <linux/moduleparam.h>
+#include <linux/stat.h>
+#include <linux/fs.h>
+#include <linux/kdev_t.h>
+#include <linux/cdev.h>
+#include <linux/sched.h>
+#include <linux/slab.h>
+#include <linux/uaccess.h>
+#include <linux/device.h>
+#include <linux/errno.h>
+
+#define PLUSWORLD_SIZE 0x1000
+#define PLUSWORLD_MAJOR 230
+
+static int plusworld_major = PLUSWORLD_MAJOR;
+static struct class *myclass;
+
+struct plusworld_dev {
+struct cdev cdev;
+unsigned int current_len;
+unsigned char mem[PLUSWORLD_SIZE];
+struct mutex mutex;
+wait_queue_head_t r_wait;
+wait_queue_head_t w_wait;
+};
+
+struct plusworld_dev *plusworld_dev;
+
+static ssize_t  plusworld_read(struct file *filp,char __user *buf,size_t count,loff_t *ppos)
+{
+	int ret;
+	struct plusworld_dev *dev = filp->private_data;
+	DECLARE_WAITQUEUE(wait,current);
+
+	mutex_lock(&dev->mutex);
+	add_wait_queue(&dev->r_wait,&wait);
+
+	while(dev->current_len == 0) {
+		if (filp->f_flags & O_NONBLOCK){
+			ret = -EAGAIN;
+			goto out;
+		}
+		__set_current_state(TASK_INTERRUPTIBLE);
+		mutex_unlock(&dev->mutex);
+
+		schedule();
+		if (signal_pending(current)){
+			ret = -ERESTARTSYS; 
+			goto out2;
+		}
+		
+		mutex_lock(&dev->mutex);
+	}
+	
+	if (count > dev->current_len)
+		count = dev->current_len;
+
+	if (copy_to_user(buf, dev->mem, count)) {
+		ret = -EFAULT;
+		goto out;
+	}
+	else {
+		memcpy(dev->mem, dev->mem + count, dev->current_len - count);
+		dev->current_len -= count;
+		printk(KERN_INFO "read %d bytes(s),current_len:%d\n",count,dev->current_len);
+
+		wake_up_interruptible(&dev->w_wait);
+
+		ret = count;
+	}
+out:
+mutex_unlock(&dev->mutex);
+out2:
+remove_wait_queue(&dev->r_wait,&wait);
+set_current_state(TASK_RUNNING);
+return ret;
+}
+
+struct file_operations plusworld_fops = {
+	.owner = THIS_MODULE,
+	.read = plusworld_read,
+};
+
+static void globalmem_setup_cdev(struct plusworld_dev *dev,int index)
+{
+	int err, devno = MKDEV(plusworld_major,index);
+
+	cdev_init(&dev->cdev, &plusworld_fops);
+	dev->cdev.owner = THIS_MODULE;
+	err = cdev_add(&dev->cdev,devno,1);
+	if (err)
+		printk(KERN_NOTICE "Error %d adding plusworld %d", err, index);
+}
+
+static int __init plusworld_init(void)
+{  
+	int ret;
+	dev_t devno = MKDEV(plusworld_major,0);
+
+	if(plusworld_major)
+		ret = register_chrdev_region(devno,1,"plusworld");
+	else {
+		ret = alloc_chrdev_region(&devno,0,1,"plusworld");
+		plusworld_major = MAJOR(devno);
+	}
+	if (ret < 0)
+		return ret;
+
+		myclass = class_create(THIS_MODULE,"plusworld");
+
+	plusworld_dev = kzalloc(sizeof(struct plusworld_dev), GFP_KERNEL);
+	if (!plusworld_dev){
+		ret = -ENOMEM;
+		goto fail_malloc;
+	}
+
+	globalmem_setup_cdev(plusworld_dev,0);
+
+
+	device_create(myclass,NULL,MKDEV(230,1),NULL,"plusworld""%d",0);
+
+	mutex_init (&plusworld_dev->mutex);
+	init_waitqueue_head(&plusworld_dev->r_wait);
+	init_waitqueue_head(&plusworld_dev->w_wait);
+
+	return 0;
+
+
+fail_malloc:
+	unregister_chrdev_region (devno, 1);
+	return ret;
+}	
+
+static void __exit plusworld_exit(void)
+{
+	cdev_del(&plusworld_dev->cdev);
+	unregister_chrdev_region(MKDEV(plusworld_major,0),1);//注销设备号
+}
+
+module_init( plusworld_init);
+module_exit( plusworld_exit);
+
+MODULE_AUTHOR("Plusworld");
+MODULE_LICENSE("GPL");
