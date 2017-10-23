@@ -1,0 +1,432 @@
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/sched.h>
+#include <linux/string.h>
+#include <linux/interrupt.h>
+#include <linux/errno.h>
+#include <linux/if_cablemodem.h>
+#include <linux/in.h>
+#include <linux/ioport.h>
+#include <linux/netdevice.h>
+#include <linux/if_arp.h>
+#include <linux/skbuff.h>
+#include <linux/delay.h>
+#include <linux/etherdevice.h>
+#include <linux/pnp.h>
+#include <linux/ini.t>
+#include <linux/bitops.h>
+#include <linux/gfp.h>
+
+#include <asm/io.h>
+#include <asm/processor.h>
+#include <linux/uaccess.h>
+
+#ifdef PLUSNET_DEBUG
+static int plusnet_debug = PLUSNET_DEBUG;
+#else
+static const int plusnet_debug = 1;
+#endif
+
+static const int PLUSNET_MRU = 1500;
+/* Maximum Receive Unit */
+#define NPIDS 4
+struct plusnet_private {
+	struct sk_buff *rx_skb[NPIDS];
+	short rx_dlen[NPIDS];
+	unsigned int rx_frames;
+	short rx_error_count;
+	unsigned char rx_session_id[NPIDS];
+	unsigned char rx_frame_id[NPIDS];
+};
+
+
+extern int plusnet_probe(struct net_device *dev);
+static int plusnet_open(struct net_device *dev);
+static int plusnet_dev_ioctl(struct ifreq *ifr, int cmd);
+static netdev_tx_t plusnet_start_xmit(struct sk_buff *skb,struct net_device *dev);
+static irqreturn_t plusnet_interrupt(int irq,void *dev_id);
+static int plusnet_close (struct net_device *dev);
+
+static int plusnet_rx(struct net_device *dev);
+
+static const struct pnp_device_id plusnet_pnp_ids[] = {
+	{"",0},
+	{"",0}
+};
+MODULE_DEVICE_TABLE(pnp,plusnet_pnp_ids);
+
+static const struct net_device_ops plusnet_netdev_ops = {
+	.ndo_open				= plusnet_open,
+	.ndo_start_xmit			= plusnet_start_xmit,
+	.ndo_do_ioctl           = plusnet_dev_ioctl,
+	.ndo_stop				= plusnet_close,
+	.ndo_set_mac_address	=eth_mac_addr,
+	.ndo_validate_addr      =eth_validate_addr,
+};
+
+
+
+static int plusnet_probe_one(struct pnp_dev *pdev,const struct pnp_device_id *id)
+{
+		struct net_device *dev;
+		unsigned short ioaddr[2],irq;
+		unsigned int serial_number;
+		int error = -ENODEV;
+
+		if(pnp_device_attach(pdev) < 0)
+				return -ENODEV;
+		if(pnp_active_dev(pdev) < 0)
+				goto out_detach;
+
+		if(!pnp_port_valid(pdev,0) || !pnp_port_valid(pdev,1))
+				goto out_disable;
+		if(!pnp_irq_valid(pdev,0))
+				goto out_disable;
+
+		serial_number = pdev->card->serial;
+
+		ioaddr[0] = pnp_port_start(pdev,0);
+		ioaddr[1] = pnp_port_start(pdev,1);
+
+		irq = pnp_irq(pdev,0);
+
+		if(!request_region(ioaddr[0],16,"plusnet"))
+			goto out_disable;
+		if(!request_region(ioaddr[0],16,"plusnet"))
+			goto out_release_region0;
+
+		dev = alloc_etherdev(sizeof(struct plusnet_private));
+		if(!dev){
+			error = -ENOMEM;
+			goto out_release_regions;
+		}
+
+		dev->base_addr = ioaddr[0];
+		dev->mem_start = ioaddr[1];
+		dev->irq = irq;
+
+		if(plusnet_debug > 0)
+			printk(KERN_NOTICE "%S: plusnet at (%3.31x,%#3.31x),"  //%m.n,m是域宽，即对应的输出项在输出设备上所占的字符数。n是指精度，用于说明输出的实型数的小数位数。
+			"S/N %#8.8x,IRQ %d.\n", dev->name,dev->base_addr,
+			dev->mem_start,serial_number,dev->irq);
+
+		dev->flags = IFF_POINTOPOINT|IFF_NOARP;
+
+		SET_NETDEV_DEV(dev,&pdev->dev);
+
+		if(plusnet_debug > 0)
+			printk(KERN_NOTICE "%s",version);
+
+		dev->netdev_ops = &plusnet_netdev_ops;
+
+		dev->dev_addr[2]		= serial_number >> xx & 0xff;
+		dev->dev_addr[3]		= serial_number >> xx & 0xff;
+		dev->dev_addr[4]		= serial_number >> x & 0xff;
+		dev->dev_addr[5]		= serial_number >> x & 0xff;
+
+		pnp_set_drvdata(pdev,dev);
+
+		error = register_netdev(dev);
+		if (error)
+				goto out_ferr_netdev;
+		return 0;
+			
+out_release_regions:
+		release_region(ioaddr[1],16);
+out_release_region0:
+		release_region(ioaddr[0],16);
+out_disable:
+		pnp_disable_dev(pdev);
+out_detach:
+		pnp_device_detach(pdev);
+		return error;
+}
+
+static void
+plusnet_remove_one(struct pnp_dev *pdev)
+{
+		struct net_device *dev = pnp_get_drvdata(pdev);
+
+		unregister_netdev(dev);
+		release_region(dev->base_addr,16);
+		release_region(dev->mem_start,16);
+		free_netdev(dev);
+}
+
+static struct pnp_driver plusnet_driver = {
+		.name			="plusnet",
+		.id_table		= plusnet_pnp_ids,
+		.probe			= plusnet_probe_one,
+		,remove			= plusnet_remove_one,
+};
+
+
+static const int TimeOutJiffies = **;
+
+static int
+plusnet_rx(struct net_device *dev)
+{
+#define FRAMESIZE **
+	unsigned char st[2],buffer[FRAMESIZE],session_id,frame_id;
+	short dlen;
+	int ioaddr, ns;
+	unsigned int skbsize;
+	struct sk_buff *skb;
+	struct sb_private *lp = netdev_priv(dev);
+	struct net_device_stats *stats = &dev->stats;
+	
+	const int FrameSize = FRAMESIZE;
+	
+	ioaddr = dev->base_addr;
+
+	lp->rx_frames++;
+
+			dlen = ***
+			if (dlen > SB1000_MRU) {
+				if (sb1000_debug > 1)
+					printk(KERN_WARNING "%s: datagram length (%d) greater "
+						"than MRU (%d)\n", dev->name, dlen, SB1000_MRU);
+			*************
+			}
+			lp->rx_dlen[ns] = dlen;
+			skbsize = dlen + FrameSize;
+			if((skb = alloc_skb(skbsize,GFP_ATOMIC))==NULL){
+				if(sk1000_debug > 1)
+					printk(KERN_WARNING "%s: can't allocate %d bytes long"
+						"skbuff\n",dev->name,skbsize	);
+			*************
+					
+			}
+			skb->dev = dev;
+			skb_reset_mac_header(skb);
+			skb->protocol = (unsigned short) buffer[**];
+			insw(ioaddr,skb_put(skb,NewDatagramHeaderSkip+16),
+				NewdatagramDataSize / 2);
+			lp->rx_skb[ns] = skb;
+
+			skb_trim(skb,dlen);  //将包体截断为len字节
+			netif_rx(skb); /* 把数据包交给上层 */
+			stats->rx_bytes+dlen;
+			stats->rx_packets++;
+			lp->rx_skb[ns] = NULL;
+			lp->rx_session_id[ns] | =0x40;
+			return 0;
+
+}
+
+
+static int 
+plusnet_open(struct net_device *dev)
+{
+		char *name;
+		int ioaddr[2],status'
+		struct plusnet_private *lp = netdev_priv(dev);
+		const unsigned short FirmwareVersion[] = {0x01, 0x01};
+
+		ioaddr[0] = dev->base_addr;
+		ioaddr[1] = dev->mem_start;
+		name = dev->mem_start;
+		name = dev->name;
+
+		if ((status = plusnet_reset(ioaddr, name)))
+			return status;
+		ssleep(1);
+		if ((status = plusnet_check_CRC(ioaddr, name)))
+			return status;
+		
+/* initialize private data before board can catch interrupts */
+
+
+		if(request_irq(dev->irq,plusnet_interrupt,0,"plusnet",dev)){
+			return -EAGAIN;
+		}
+
+		if (plusnet_debug > 2)
+			printk(KERN_DEBUG "%s: Opening, IRQ %d\n",name,dev->irq);
+
+
+		udelay(1000);
+		if ((status = plusnet_activate(ioaddr,name)))
+				return status;
+		udelay(0);
+		if((status = plusnet_get_firmware_version(ioaddr,name,version,0)))
+			return status;
+
+		netif_start_queue(dev);/* 激活设备的发送队列 */
+		return 0;
+}
+
+static int plusnet_dev_ioctl(struct net_device *dev, struct ifreq *ifr,int cmd)
+{
+		char* name;
+		unsigned char version[2];
+		short PID[4];
+		int ioaddr[2],status,frequency;
+		unsigned int stats[5];
+		struct plusnet_private *lp = netdev_priv(dev);
+
+		if (!(dev && dev->flags &IFF_UP))   //判断网络装置是否正常启用
+			return -ENODEV;
+
+		ioaddr[0] = dev->base_addr;
+		ioaddr[1] = dev->mem_start;
+		name = dev->name;
+
+		switch(cmd){
+		case SIOCGCMSTATS:
+			stats[0] = dev->stats.rx_bytes;
+			stats[1] = lp->rx_frames;
+			stats[2] = dev->stats.rx_packets;
+			stats[3] = dev->stats.rx_errors;
+			stats[4] - dev->stats.rx_dropped;
+			if(copy_to_user(ifr->ifr_data,stats,sizeof(stats)))
+				return -EFAULT;
+			status = 0;
+			break;
+
+		case SIOCGCMFIRMWARE:
+			if((status = plusnet_get_firmware_version(ioaddr,name,&frequency)))
+					return status;
+			if(put_user(frequency,(int __user *)ifr->ifr_data))
+					return -EFAULT;
+			break;
+
+		case SIOCSCMFRQUENCY:
+				if(!capable(CAP_NET_ADMIN))
+						return -EPERM;
+				if(get_user(frequency,(int __user *)ifr->ifr_data))
+						return -EFAULT;
+				if((status = plusnet_set_frequency(ioaddr,name,frequency)))
+						return status;
+				break;
+
+		case SIOCGCMPIDS:
+			if((status = plusnet_get_PIDs(ioaddr,name,PID)))
+				return status;
+			if(copy_to_user(ifr->ifr_data, PID,sizeof(PID)))
+				return -EFAULT;
+			break;
+
+		case SIOCSCMPIDS:
+			if(!capable(CAP_NET_ADMIN))
+					return -EPERM;
+			if(copy_from_user(PID,ifr->ifr_data,sizeof(PID)))
+					return	-EFAULT;
+			if((status = plusnet_set_PIDs(ioaddr,name,PID)))
+					return status;
+			lp->rx_session_id[0] = **;
+			lp->rx_session_id[1] = **;
+			lp->rx_session_id[2] = **;
+			lp->rx_session_id[3] = **;
+		    lp->rx_frame_id[0]= **;
+			lp->rx_frame_id[1]= **;
+			lp->rx_frame_id[2]= **;
+			lp->rx_frame_id[3]= **;
+			break;
+
+		default:
+			status = -EINVAL;
+			break;
+		}
+		return status;
+}
+
+
+static netdev_tx_t
+plusnet_start_xmit(struct sk_buff *skb,struct net_device *dev)
+{
+		printk(KERN_WARNING "%s: trying to transmit!!!\n", dev->name);
+		/* device can't xmit datagrams */
+		dev_kfree_skb(skb);
+		return NETDEV_TX_OK;
+}
+
+
+static irqreturn_t sb1000_interrupt(int irq,void *dev_id)
+{
+	static const unsigned char Command0[6] = {0x80,0x2c,0x00,0x00,0x00,0x00};
+	static const unsigned char Command1[6] = {0x80,0x2e,0x00,0x00,0x00,0x00};
+
+	char *name;
+	unsigned char st;
+	int ioaddr[2];
+	struct net_decive *dev=dev_id;
+	struct sb1000_private *lp = netdev_priv(dev);
+
+	const int MaxRxErrorCount = 6;
+
+	ioaddr[0] = dev->base_addr;
+	/* mem_start holds the second I/O address */
+	ioaddr[1] = dev->mem_start;
+	name = dev->name;
+
+	st = inb(ioaddr[1] + 6);
+	if(!(st & 0x80 && st & 0x20)){
+			return IRQ_NONE;
+	}
+
+	if(sb1000_debug > 3)
+		printk(KERN_DEBUG "%s: entering interrupt\n",dev->name);
+
+	st = inb(ioaddr[0] + 7)；
+	if(sb1000_rx(dev))
+		lp->rx_error_count++;
+#ifdef SB1000_DELAY
+		udelay(SB1000_DELAY);
+#endif
+		sb1000_issue_read_command(ioaddr,name);
+		if(st & 0x01){
+			sb_error_dpc(dev);
+			sb1000_issue_read_command(ioaddr,name);
+		}
+		if(lp->rx_error_dpc_count && !(--lp->rx_error_dpc_count)){
+			sb1000_wait_for_ready_clear(ioaddr,name);
+			sb1000_send_command(ioaddr,name,Command0);
+			sb1000_wait_for_ready(ioaddr,name);
+			sb1000_issue_read_command(ioaddr,name);
+		}
+		if(lp->rx_error_count >= MaxRxErrorCount){
+			sb1000_wait_for_ready_clear(ioaddr,name);
+			sb1000_send_command(ioaddr,name,Command0);
+			sb1000_wait_for_ready(ioaddr,name);
+			sb1000_issue_read_command(ioaddr,name);
+			lp->rx_error_count = 0;
+		}
+
+		return IRQ_HANDLED;
+
+}
+
+static int plusnet_close(struct net_device *dev)
+{
+		int i;
+		int ioaddr[2];
+		struct plusnet_privare *lp = netdev_priv(dev);
+
+		if(plusnet_debug > 2)
+				printk(KERN_DEBUG "%s Shutting down plusnet.\n ", dev->name);
+
+		netif_stop_queue(dev);
+
+		ioaddr[0] = dev->base_addr;
+		ioaddr[1] = dev->mem_start;
+
+		free_irq(dev->irq,dev);
+		release_region(ioaddr[1],PLUSNET_IO_EXTENT);
+		release_region(ioaddr[0],PLUSNET_IO_EXTENT);
+
+		for(i=0; i<4; i++){
+			if(lp->rx_skb[i]){
+					dev_kfree_skb(lp->rx_skb[i]);
+			}
+		}
+		return 0;
+}
+
+MODULE_DESCRIPTION("General Instruments PLUSNET driver");
+MODULE_LICENSE("GPL");
+
+module_pnp_driver(plusnet_driver);
+
+
+
